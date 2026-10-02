@@ -1,0 +1,168 @@
+name: Archil native Actions runner
+description: Provision, watch, clean up, or reconcile ephemeral Actions runners on Archil filesystem forks
+
+inputs:
+  operation:
+    description: provision, watch, cleanup, or reconcile
+    default: provision
+  api-key:
+    description: Regional Archil API key (controller only)
+    required: true
+  runner-admin-token:
+    description: Repository-scoped GitHub runner Administration token (controller only)
+    required: true
+  actions-token:
+    description: Workflow token with Actions read for reconciliation or write for watchdog cancellation
+    default: ${{ github.token }}
+  region:
+    description: Archil AWS region
+    default: aws-us-east-1
+  image:
+    description: Public Ubuntu 24.04-compatible Linux x64 OCI image
+    default: ubuntu:24.04
+  vcpus:
+    description: Sandbox virtual CPU count
+    default: '8'
+  memory-mib:
+    description: Sandbox memory in MiB
+    default: '32768'
+  source-sha:
+    description: Exact checked-out commit to archive for template setup
+    default: ${{ github.sha }}
+  bootstrap-command:
+    description: Trusted setup command executed as root in the unregistered template
+    default: ''
+  warm-command:
+    description: Optional trusted cache-warming command before any runner registration
+    default: ''
+  environment:
+    description: JSON map of non-secret toolchain/cache environment for setup and runner
+    default: '{}'
+  cache-root:
+    description: Persistent cache directory outside the checkout/work directory
+    default: /workspace/cache
+  template-id:
+    description: Optional stopped unregistered template from a prior successful run
+    default: ''
+  retain-template:
+    description: Keep a newly prepared unregistered template for explicit cross-run reuse
+    default: 'false'
+  output-directory:
+    description: Local controller measurements directory
+    default: ${{ runner.temp }}/archil-ci-results
+  runner-name:
+    description: Exact provision output required by watch
+    default: ''
+  runner-label:
+    description: Exact provision output required by watch
+    default: ''
+  job-name:
+    description: Native job display name monitored by watch
+    default: Archil native CI
+  queue-timeout-seconds:
+    description: Maximum watchdog wait for native job pickup
+    default: '300'
+  watchdog-timeout-seconds:
+    description: Total watchdog deadline (include native job timeout and queue allowance)
+    default: '3300'
+  reconcile-min-age-seconds:
+    description: Minimum sandbox age for terminal-attempt reconciliation
+    default: '300'
+  reconcile-max-resources:
+    description: Maximum resources processed per reconciliation sweep
+    default: '100'
+
+outputs:
+  runner-label:
+    description: Unique self-hosted routing label
+    value: ${{ steps.controller.outputs.runner_label }}
+  runner-name:
+    description: Registered ephemeral runner name
+    value: ${{ steps.controller.outputs.runner_name }}
+  sandbox-id:
+    description: Archil runner sandbox ID
+    value: ${{ steps.controller.outputs.sandbox_id }}
+  template-id:
+    description: Stopped unregistered template sandbox ID
+    value: ${{ steps.controller.outputs.template_id }}
+  template-retained:
+    description: Effective source retention flag to pass to watch and cleanup
+    value: ${{ steps.controller.outputs.template_retained }}
+  cache-mode:
+    description: tools or warm
+    value: ${{ steps.controller.outputs.cache_mode }}
+  cache-root:
+    description: Effective persistent cache root
+    value: ${{ steps.controller.outputs.cache_root }}
+  workspace:
+    description: Runner checkout location
+    value: ${{ steps.controller.outputs.workspace }}
+
+runs:
+  using: composite
+  steps:
+    - name: Validate operation and credentials
+      shell: bash
+      env:
+        OPERATION: ${{ inputs.operation }}
+        ARCHIL_API_KEY: ${{ inputs.api-key }}
+        GH_RUNNER_ADMIN_TOKEN: ${{ inputs.runner-admin-token }}
+      run: |
+        case "$OPERATION" in
+          provision|watch|cleanup|reconcile) ;;
+          *) echo "::error::operation must be provision, watch, cleanup, or reconcile"; exit 1 ;;
+        esac
+        if [[ -z "$ARCHIL_API_KEY" || -z "$GH_RUNNER_ADMIN_TOKEN" ]]; then
+          echo "::error::api-key and runner-admin-token are required"
+          exit 1
+        fi
+    - uses: actions/setup-node@v6
+      with:
+        node-version: '24'
+    - name: Install pinned controller dependencies
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+      run: npm ci --ignore-scripts --prefix "$ACTION_PATH"
+    - name: Archive tracked consumer source
+      if: inputs.operation == 'provision'
+      shell: bash
+      env:
+        SOURCE_SHA: ${{ inputs.source-sha }}
+      run: |
+        if [[ ! "$SOURCE_SHA" =~ ^[a-fA-F0-9]{40}$ && ! "$SOURCE_SHA" =~ ^[a-fA-F0-9]{64}$ ]]; then
+          echo "::error::source-sha must be an exact commit SHA"
+          exit 1
+        fi
+        git -C "$GITHUB_WORKSPACE" archive --format=tar \
+          --output="$RUNNER_TEMP/archil-native-source-$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT.tar" "$SOURCE_SHA"
+    - name: Run Archil lifecycle controller
+      id: controller
+      shell: bash
+      env:
+        ACTION_PATH: ${{ github.action_path }}
+        OPERATION: ${{ inputs.operation }}
+        ARCHIL_API_KEY: ${{ inputs.api-key }}
+        GH_RUNNER_ADMIN_TOKEN: ${{ inputs.runner-admin-token }}
+        GITHUB_TOKEN: ${{ inputs.actions-token }}
+        ARCHIL_CI_REGION: ${{ inputs.region }}
+        ARCHIL_CI_BASE_IMAGE: ${{ inputs.image }}
+        ARCHIL_CI_VCPUS: ${{ inputs.vcpus }}
+        ARCHIL_CI_MEMORY_MIB: ${{ inputs.memory-mib }}
+        ARCHIL_CI_SOURCE_SHA: ${{ inputs.source-sha }}
+        ARCHIL_CI_ARCHIVE: ${{ runner.temp }}/archil-native-source-${{ github.run_id }}-${{ github.run_attempt }}.tar
+        ARCHIL_CI_BOOTSTRAP_COMMAND: ${{ inputs.bootstrap-command }}
+        ARCHIL_CI_WARM_COMMAND: ${{ inputs.warm-command }}
+        ARCHIL_CI_GUEST_ENV: ${{ inputs.environment }}
+        ARCHIL_CI_CACHE_ROOT: ${{ inputs.cache-root }}
+        ARCHIL_CI_TEMPLATE_ID: ${{ inputs.template-id }}
+        ARCHIL_CI_RETAIN_TEMPLATE: ${{ inputs.retain-template }}
+        ARCHIL_CI_OUTPUT: ${{ inputs.output-directory }}
+        ARCHIL_CI_EXPECTED_RUNNER_NAME: ${{ inputs.runner-name }}
+        ARCHIL_CI_EXPECTED_RUNNER_LABEL: ${{ inputs.runner-label }}
+        ARCHIL_CI_JOB_NAME: ${{ inputs.job-name }}
+        ARCHIL_CI_RUNNER_QUEUE_TIMEOUT_SECONDS: ${{ inputs.queue-timeout-seconds }}
+        ARCHIL_CI_WATCHDOG_SECONDS: ${{ inputs.watchdog-timeout-seconds }}
+        ARCHIL_CI_RECONCILE_MIN_AGE_SECONDS: ${{ inputs.reconcile-min-age-seconds }}
+        ARCHIL_CI_RECONCILE_MAX_RESOURCES: ${{ inputs.reconcile-max-resources }}
+      run: node "$ACTION_PATH/src/cli.mjs" "$OPERATION"

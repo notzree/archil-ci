@@ -1,0 +1,33 @@
+name: Test Archil CI integration
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  tests:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '24'
+      - run: npm ci --ignore-scripts
+      - run: npm test
+      - run: npm run test:guest
+      - run: shellcheck scripts/runner-guest.sh
+      - name: Validate composite action without cloud credentials
+        id: invalid
+        continue-on-error: true
+        uses: ./
+        with:
+          operation: invalid
+          api-key: test-only-not-a-credential
+          runner-admin-token: test-only-not-a-credential
+      - name: Require fail-closed operation validation
+        env:
+          OUTCOME: ${{ steps.invalid.outcome }}
+        run: test "$OUTCOME" = failure
